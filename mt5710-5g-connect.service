@@ -1,0 +1,14 @@
+[Unit]
+Description=Bring up TD Tech MT5710 5G NCM connection
+After=systemd-udev-settle.service NetworkManager.service
+Wants=NetworkManager.service
+Conflicts=ModemManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=MT5710_APN=ctnet
+ExecStart=/usr/local/sbin/mt5710-5g-connect.sh
+
+[Install]
+WantedBy=multi-user.target
