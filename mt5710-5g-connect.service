@@ -5,10 +5,15 @@ Wants=NetworkManager.service
 Conflicts=ModemManager.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 Environment=MT5710_APN=ctnet
+Environment=MT5710_CHECK_INTERVAL=20
+Environment=MT5710_FAILURE_LIMIT=3
+Environment=MT5710_RETRY_DELAY=15
 ExecStart=/usr/local/sbin/mt5710-5g-connect.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target

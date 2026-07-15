@@ -610,49 +610,21 @@ chmod 755 /usr/local/sbin/mt5710-5g-connect.py
 
 ### 9.2 安装连接脚本
 
-创建 `/usr/local/sbin/mt5710-5g-connect.sh`：
+仓库中的 `mt5710-5g-connect.sh` 已改为常驻守护脚本。安装时直接复制，避免文档里的
+代码片段和实际维护版本不一致：
 
 ```bash
-cat >/usr/local/sbin/mt5710-5g-connect.sh <<'SH'
-#!/bin/sh
-set -eu
-
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-APN="${MT5710_APN:-ctnet}"
-
-modprobe cdc_ncm 2>/dev/null || true
-modprobe option 2>/dev/null || true
-modprobe usbserial 2>/dev/null || true
-
-for _ in $(seq 1 20); do
-    if lsusb -d 3466:3301 >/dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
-
-if [ -e /sys/bus/usb-serial/drivers/option1/new_id ] && ! ls /dev/ttyUSB* >/dev/null 2>&1; then
-    echo "3466 3301" > /sys/bus/usb-serial/drivers/option1/new_id 2>/dev/null || true
-fi
-
-for _ in $(seq 1 20); do
-    [ -e /dev/ttyUSB1 ] && [ -d /sys/class/net/usb1 ] && break
-    sleep 1
-done
-
-MT5710_APN="$APN" /usr/local/sbin/mt5710-5g-connect.py
-
-ip link set usb1 up
-sleep 3
-
-dhclient -r usb1 2>/dev/null || true
-dhclient -1 usb1
-
-printf 'nameserver 223.5.5.5\nnameserver 114.114.114.114\n' > /etc/resolv.conf
-SH
-
-chmod 755 /usr/local/sbin/mt5710-5g-connect.sh
+install -m 755 mt5710-5g-connect.sh /usr/local/sbin/mt5710-5g-connect.sh
 ```
+
+守护脚本负责以下工作：
+
+1. 等待 `usb1` 和 AT 串口出现；
+2. 冷启动或 USB 重枚举后，如果 `3466:3301` 没有生成串口，主动写入
+   `option1/new_id`，恢复 `/dev/ttyUSB0`～`/dev/ttyUSB3`；
+3. 检查 `usb1` carrier、IPv4 地址、目标路由和公网连通性；
+4. 服务启动时链路不健康则立即拨号；运行中连续 3 次检查失败才重拨，过滤短暂抖动；
+5. 重拨时重新发送 AT NCM 命令、拉起接口并执行 DHCP；失败后持续重试。
 
 ### 9.3 安装 systemd 服务
 
@@ -667,10 +639,15 @@ Wants=NetworkManager.service
 Conflicts=ModemManager.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 Environment=MT5710_APN=ctnet
+Environment=MT5710_CHECK_INTERVAL=20
+Environment=MT5710_FAILURE_LIMIT=3
+Environment=MT5710_RETRY_DELAY=15
 ExecStart=/usr/local/sbin/mt5710-5g-connect.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -728,9 +705,8 @@ systemctl --no-pager --full status mt5710-5g-connect.service
 成功示例：
 
 ```text
-Active: active (exited)
-ExecStart=/usr/local/sbin/mt5710-5g-connect.sh (code=exited, status=0/SUCCESS)
-dhclient -1 usb1
+Active: active (running)
+Main PID: ... /bin/sh /usr/local/sbin/mt5710-5g-connect.sh
 ```
 
 查看服务日志：
@@ -816,11 +792,12 @@ ping -c 3 -W 3 223.5.5.5
 本次重启验证结果：
 
 ```text
-mt5710-5g-connect.service: active (exited)
+mt5710-5g-connect.service: active (running)
+binding MT5710 serial interfaces to option driver
 ^NDISSTAT: 1,1,,,"IPV4"
-usb1 UP 10.29.57.54/8
+usb1 UP 10.5.19.99/8
 default via 10.0.0.1 dev usb1
-ping 223.5.5.5: 3 received, 0% packet loss
+ping 223.5.5.5: 5 received, 0% packet loss
 ```
 
 ## 14. 本次遇到的问题和处理方法
@@ -978,6 +955,76 @@ SINR: 14-17 dB
 3. 如果 RSRP 在 `-105 dBm` 左右，优先更换为 4G/5G 蜂窝全频天线，而不是继续调软件。
 4. 如果两路天线差距很大，断电后交换 MAIN/DIV 天线，再重新测试。
 5. 测速时优先使用国内大文件下载源；海外 HTTPS 测速源、证书时间异常、单线程下载都可能让结果偏低。
+
+### 14.9 板卡不断电但 `usb1` 掉线，或者冷启动后始终没有 IP
+
+这次现场出现了两个容易混在一起的问题。
+
+第一种现象是 RK3568、板载网口和热点仍在线，但 `usb1` 变成：
+
+```text
+usb1 DOWN <NO-CARRIER,BROADCAST,MULTICAST,UP>
+```
+
+同时 IPv4 地址和默认路由消失。`lsusb` 仍能看到 `3466:3301`，信号查询也显示模块
+注册在 NR 网络。这说明掉的是 MT5710 的 NDIS 数据会话，不是 RK3568 整板断电，也不是
+USB 设备一定发生了重枚举。
+
+旧服务使用 `Type=oneshot`，只在开机时拨号一次，成功后显示 `active (exited)`。运行中
+NDIS 会话被运营商、基站或模块释放后，没有任何进程负责重新拨号。热点仍能被看到甚至
+成功分配 `10.42.0.x`，但客户端无法访问互联网，`dnsmasq` 还可能因为上游断网出现：
+
+```text
+Maximum number of concurrent DNS queries reached
+```
+
+第二种现象只在完整断电再上电后出现：
+
+```text
+lsusb -t: MT5710 的 NCM 接口由 cdc_ncm 驱动
+usb1: 已生成但 NO-CARRIER
+/dev/ttyUSB*: 不存在
+MT5710 的 4 个 Vendor Specific 接口没有 Driver
+```
+
+根因是 `cdc_ncm` 能自动匹配数据接口，但当前内核的 `option` 驱动没有内置
+`3466:3301` 匹配项。热运行时串口曾经绑定过，所以问题被掩盖；冷启动后绑定状态丢失，
+守护程序没有 `/dev/ttyUSB1` 就无法发送 AT 拨号命令。
+
+最终修复包含两层：
+
+1. 守护程序发现模块存在但没有 `/dev/ttyUSB*` 时，自动执行：
+
+   ```bash
+   echo "3466 3301" > /sys/bus/usb-serial/drivers/option1/new_id
+   ```
+
+2. 服务改为 `Type=simple` 常驻运行，每 20 秒检查 carrier、IPv4、目标路由和公网连通性；
+   运行中连续 3 次失败后重新发送 `AT^NDISDUP=1,1` 并执行 DHCP。systemd 还配置了
+   `Restart=always`，守护脚本自身异常退出也会被重新拉起。
+
+本次验收不是只看 `systemctl` 状态，而是完成了两轮真实测试：
+
+```text
+测试一：远程 reboot
+结果：新启动中自动绑定 option 串口、自动拨号，usb1 获得 10.5.19.99/8，公网 0% 丢包
+
+测试二：发送 AT^NDISDUP=1,0 主动断开 NCM 会话
+结果：carrier 变为 0、IP/路由消失；连续 3 次检查失败后自动重拨，
+      usb1 获得 10.30.52.71/8，公网 0% 丢包
+```
+
+排查这类故障时，不要只看“板卡是否断电”或“热点是否可见”，应分层检查：
+
+```bash
+lsusb -t
+ls -l /dev/ttyUSB*
+cat /sys/class/net/usb1/carrier
+ip -br addr show usb1
+ip route show default
+systemctl --no-pager --full status mt5710-5g-connect.service
+journalctl -u mt5710-5g-connect.service -b --no-pager
+```
 
 ## 15. 常用排查命令
 
