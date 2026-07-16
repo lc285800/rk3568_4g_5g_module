@@ -1,0 +1,8 @@
+[Unit]
+Description=Record MT5710 5G registration, signal and connectivity
+After=mt5710-5g-connect.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/mt5710-5g
+ExecStart=/usr/local/sbin/monitor_mt5710_5g.sh

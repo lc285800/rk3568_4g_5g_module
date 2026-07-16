@@ -7,7 +7,7 @@ import time
 
 
 PORT = os.environ.get("MT5710_AT_PORT", "/dev/ttyUSB1")
-APN = os.environ.get("MT5710_APN", "ctnet")
+APN = os.environ.get("MT5710_APN", "cbnet")
 
 
 def configure_port(fd):
@@ -63,7 +63,7 @@ def main():
         sys.stdout.flush()
 
         text = transcript.decode("utf-8", "replace")
-        if "^NDISSTAT: 1,1" in text or "OK" in text:
+        if "^NDISSTAT: 1,1" in text:
             return 0
         return 1
     finally:

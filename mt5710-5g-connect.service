@@ -1,15 +1,18 @@
 [Unit]
 Description=Bring up TD Tech MT5710 5G NCM connection
-After=systemd-udev-settle.service NetworkManager.service
+After=mt5710-sim-detect.service NetworkManager.service
+Requires=mt5710-sim-detect.service
 Wants=NetworkManager.service
 Conflicts=ModemManager.service
 
 [Service]
 Type=simple
-Environment=MT5710_APN=ctnet
+Environment=MT5710_APN=cbnet
 Environment=MT5710_CHECK_INTERVAL=20
 Environment=MT5710_FAILURE_LIMIT=3
 Environment=MT5710_RETRY_DELAY=15
+EnvironmentFile=-/etc/default/mt5710-5g
+EnvironmentFile=/run/mt5710-detected-profile
 ExecStart=/usr/local/sbin/mt5710-5g-connect.sh
 Restart=always
 RestartSec=5

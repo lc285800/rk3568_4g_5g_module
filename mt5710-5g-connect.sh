@@ -2,13 +2,14 @@
 set -u
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-APN="${MT5710_APN:-ctnet}"
+APN="${MT5710_APN:-cbnet}"
 INTERFACE="${MT5710_INTERFACE:-usb1}"
 AT_PORT="${MT5710_AT_PORT:-/dev/ttyUSB1}"
 CHECK_INTERVAL="${MT5710_CHECK_INTERVAL:-20}"
 FAILURE_LIMIT="${MT5710_FAILURE_LIMIT:-3}"
 RETRY_DELAY="${MT5710_RETRY_DELAY:-15}"
 PING_TARGETS="${MT5710_PING_TARGETS:-223.5.5.5 114.114.114.114}"
+AT_LOCK="${MT5710_AT_LOCK:-/run/lock/mt5710-at.lock}"
 
 log()
 {
@@ -43,6 +44,23 @@ wait_for_devices()
     done
 }
 
+wait_for_ncm_ready()
+{
+    count=0
+    while [ "$count" -lt 30 ]; do
+        if [ -d "/sys/class/net/$INTERFACE" ]; then
+            ip link set "$INTERFACE" up 2>/dev/null || true
+            if has_carrier; then
+                return 0
+            fi
+        fi
+        count=$((count + 1))
+        sleep 2
+    done
+    log "$INTERFACE did not recover carrier after dial"
+    return 1
+}
+
 has_carrier()
 {
     [ -r "/sys/class/net/$INTERFACE/carrier" ] &&
@@ -70,14 +88,18 @@ connect_modem()
     wait_for_devices
     log "starting NCM dial (APN=$APN, interface=$INTERFACE)"
 
-    MT5710_AT_PORT="$AT_PORT" MT5710_APN="$APN" \
-        /usr/local/sbin/mt5710-5g-connect.py || {
+    (
+        flock -w 20 9 || exit 1
+        MT5710_AT_PORT="$AT_PORT" MT5710_APN="$APN" \
+            /usr/local/sbin/mt5710-5g-connect.py
+    ) 9>"$AT_LOCK" || {
             log "AT dial command failed"
             return 1
         }
 
-    ip link set "$INTERFACE" up || return 1
-    sleep 3
+    # MT5710 may reset its USB functions after NDIS succeeds. Wait for cdc_ncm
+    # to enumerate again instead of running DHCP against a vanished interface.
+    wait_for_ncm_ready || return 1
 
     dhclient -r "$INTERFACE" >/dev/null 2>&1 || true
     if ! timeout 45 dhclient -1 -v "$INTERFACE"; then

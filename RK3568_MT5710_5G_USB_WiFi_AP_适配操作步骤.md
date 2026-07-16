@@ -4,6 +4,17 @@
 > Realtek USB Wi-Fi。本文以 Ubuntu 20.04、Linux 4.19.232 为例。
 > 以下命令默认在板卡上以 `root` 用户执行。
 
+## 0. 当前测试板卡登录信息
+
+> 仅供这台自用开发板的本地调试环境使用。
+
+```text
+板卡地址: 192.168.2.130
+SSH 用户名: root
+SSH 密码: root
+登录命令: ssh root@192.168.2.130
+```
+
 ## 1. 目标链路
 
 最终目标是让板卡通过 MT5710 5G 模块上网，并继续把网络共享给 USB Wi-Fi 热点。
@@ -26,11 +37,119 @@ USB 模式: AT^SETMODE? -> ^SETMODE:4
 拨号方式: Linux NCM + AT^NDISDUP=1,1
 AT/PCUI 口: /dev/ttyUSB1
 5G 数据网卡: usb1
-APN: ctnet
+当前中国广电 SIM APN: cbnet
 DNS: 223.5.5.5, 114.114.114.114
 旧 4G GSM 配置: lubancat-4g-gsm 已禁用自动连接
 ModemManager: 已禁用，避免抢占 MT5710 AT 口
 开机服务: mt5710-5g-connect.service
+```
+
+### 中国广电 SIM 实测结果（2026-07-16）
+
+MT5710-CN 可以识别并注册本次测试的中国广电 5G SIM：
+
+```text
+AT+CPIN?    -> READY
+AT+CIMI     -> IMSI 前缀 46015
+AT+COPS?    -> CHINA BROADNET
+AT+CEREG?   -> 已注册
+AT+C5GREG?  -> 已注册 5G
+AT^SYSINFOEX -> NR-5GC
+AT^HCSQ?    -> NR
+AT+CGATT?   -> 1
+PDP 1 APN   -> cbnet
+AT^NDISDUP=1,1 -> ^NDISSTAT: 1,1, IPV4
+```
+
+结论：MT5710-CN 的硬件频段和当前 B108 固件均可接入中国广电 5G，
+广电卡使用 `cbnet` APN。
+
+本轮测试中还观察到模块拨号后 USB 设备反复断开并约 14 秒后重新枚举，
+导致 `usb1` 丢失载波、DHCP 无法继续。该现象发生在 5G 已注册且 NDIS
+已返回成功之后，因此属于 USB/供电/模块稳定性问题，不是广电 SIM
+不兼容。应优先检查 MT5710 供电、电源线、USB 接触和模块温度。
+
+### 广电与电信配置切换
+
+板卡同时保留两套运营商配置：
+
+```text
+/etc/default/mt5710-5g.broadnet  中国广电，APN cbnet
+/etc/default/mt5710-5g.telecom  中国电信，APN ctnet
+/etc/default/mt5710-5g          当前启用的配置
+```
+
+长期使用中国广电：
+
+```bash
+cp /etc/default/mt5710-5g.broadnet /etc/default/mt5710-5g
+systemctl restart mt5710-5g-connect.service
+```
+
+以后切回中国电信：
+
+```bash
+cp /etc/default/mt5710-5g.telecom /etc/default/mt5710-5g
+systemctl restart mt5710-5g-connect.service
+```
+
+电信配置仅作为备份保留，不会随广电配置部署而删除。
+
+### 长期运行服务组成
+
+当前长期插中国广电 SIM 时，开机链路由以下服务组成：
+
+```text
+mt5710-usb-bind.service
+  -> 加载 cdc_ncm、usbserial、option
+  -> 等待 USB 3466:3301
+  -> 写入 option1/new_id
+  -> 确认 /dev/ttyUSB1
+
+mt5710-sim-detect.service
+  -> 读取 AT+CIMI
+  -> 46015 选择中国广电 cbnet
+  -> 46003/46005/46011/46012 选择中国电信 ctnet
+  -> 将结果写入 /run/mt5710-detected-profile
+
+mt5710-5g-connect.service
+  -> 使用本次开机自动识别的运营商配置
+  -> AT^NDISDUP 建立 NCM 会话
+  -> 等待 usb1 和载波恢复
+  -> DHCP、默认路由、DNS
+  -> 每 20 秒检查载波、IPv4 和公网连通性
+  -> 连续失败后自动重新拨号
+
+mt5710-5g-monitor.timer
+  -> 开机两分钟后首次运行
+  -> 每五分钟记录一次运营商、5G 注册、NR 制式、信号、IP 和 Ping
+```
+
+自动识别只在开机时执行，不支持运行中热插拔切卡。更换 SIM 时应先断电，
+换卡后再上电。查看本次识别结果：
+
+```bash
+cat /run/mt5710-detected-profile
+systemctl status mt5710-sim-detect.service --no-pager
+```
+
+查看持续监测结果：
+
+```bash
+journalctl -u mt5710-5g-monitor.service --no-pager
+journalctl -f -u mt5710-5g-monitor.service
+```
+
+正常记录包含：
+
+```text
+status=online
+operator=CHINA BROADNET
+5g_registration=已注册
+system=NR-5GC
+signal=NR
+ipv4=usb1 地址
+ping=ok
 ```
 
 ## 2. 准备硬件
@@ -472,7 +591,7 @@ drain(2)
 os.write(fd, b"+++")
 drain(3)
 send(b"AT")
-send(b'AT+CGDCONT=1,"IP","ctnet"')
+send(b'AT+CGDCONT=1,"IP","cbnet"')
 send(b"AT^NDISDUP=1,1", 8)
 os.close(fd)
 PY
@@ -543,7 +662,7 @@ import termios
 import time
 
 PORT = os.environ.get("MT5710_AT_PORT", "/dev/ttyUSB1")
-APN = os.environ.get("MT5710_APN", "ctnet")
+APN = os.environ.get("MT5710_APN", "cbnet")
 
 def configure_port(fd):
     attrs = termios.tcgetattr(fd)
@@ -640,7 +759,7 @@ Conflicts=ModemManager.service
 
 [Service]
 Type=simple
-Environment=MT5710_APN=ctnet
+Environment=MT5710_APN=cbnet
 Environment=MT5710_CHECK_INTERVAL=20
 Environment=MT5710_FAILURE_LIMIT=3
 Environment=MT5710_RETRY_DELAY=15
@@ -654,15 +773,16 @@ WantedBy=multi-user.target
 EOF
 ```
 
-如果使用的不是电信 `ctnet`，修改：
+本板卡长期使用中国广电 SIM，固定配置：
 
 ```ini
-Environment=MT5710_APN=ctnet
+Environment=MT5710_APN=cbnet
 ```
 
 常见 APN：
 
 ```text
+中国广电: cbnet
 中国电信: ctnet
 中国移动: cmnet
 中国联通: 3gnet 或 wonet，按 SIM 套餐为准
@@ -718,7 +838,7 @@ journalctl -u mt5710-5g-connect.service -b --no-pager | tail -80
 成功日志中应包含：
 
 ```text
-AT+CGDCONT=1,"IP","ctnet"
+AT+CGDCONT=1,"IP","cbnet"
 OK
 AT^NDISDUP=1,1
 OK
@@ -849,7 +969,7 @@ No modems were found
 处理：先发送 `+++` 逃逸到 AT 命令态，再发送 `AT`。成功后再下发：
 
 ```text
-AT+CGDCONT=1,"IP","ctnet"
+AT+CGDCONT=1,"IP","cbnet"
 AT^NDISDUP=1,1
 ```
 

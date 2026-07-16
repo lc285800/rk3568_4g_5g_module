@@ -1,0 +1,12 @@
+[Unit]
+Description=Bind TD Tech MT5710 USB serial interfaces
+After=systemd-udev-settle.service
+Before=mt5710-5g-connect.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mt5710-usb-bind.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

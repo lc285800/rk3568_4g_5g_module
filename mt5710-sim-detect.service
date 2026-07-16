@@ -1,0 +1,14 @@
+[Unit]
+Description=Detect MT5710 SIM operator and select APN
+After=mt5710-usb-bind.service
+Requires=mt5710-usb-bind.service
+Before=mt5710-5g-connect.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/mt5710-5g
+ExecStart=/usr/bin/flock -w 20 /run/lock/mt5710-at.lock /usr/local/sbin/mt5710-sim-detect.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
